@@ -53,7 +53,7 @@ jQuery(function($){
     const html = $('#motoplus_import_html').val();
     $('#motoplus_import_html_result').text('Extracting vehicle details and importing images...');
     $('#motoplus_import_preview').html('');
-    $.post(motoplusAdmin.ajaxUrl, { action:'motoplus_import_html', nonce: motoplusAdmin.nonce, html: html, source_url: 'https://www.usedcarsni.com/' }, function(resp){
+    $.post(motoplusAdmin.ajaxUrl, { action:'motoplus_import_html', nonce: motoplusAdmin.nonce, html: html, source_url: ($('#motoplus_import_source_url').val() || 'https://www.usedcarsni.com/') }, function(resp){
       if(resp.success){
         $('#motoplus_import_html_result').text(resp.data.message);
         $('#motoplus_import_preview').html('<div class="notice notice-success inline"><p><strong>'+resp.data.title+'</strong> imported with '+resp.data.image_count+' images.</p><p><a class="button button-primary" href="'+resp.data.edit_url+'">Review Draft Vehicle</a></p></div>');

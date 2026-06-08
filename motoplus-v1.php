@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Motoplus V1
  * Description: Lightweight dealer vehicle stock system with clean listings, easy admin entry, lead capture, lookup-provider framework, and AI description placeholders.
- * Version: 1.8.0
+ * Version: 1.9.0
  * Author: Motoplus / ChatGPT
  * Text Domain: motoplus-v1
  */
@@ -10,7 +10,7 @@
 if (!defined('ABSPATH')) exit;
 
 class Motoplus_V1 {
-    const VERSION = '1.8.0';
+    const VERSION = '1.9.0';
     const VEHICLE_POST_TYPE = 'motoplus_vehicle';
     const LEAD_POST_TYPE = 'motoplus_lead';
     const META_PREFIX = '_motoplus_';
@@ -230,7 +230,8 @@ class Motoplus_V1 {
         echo '<div class="motoplus-import-box">';
         echo '<h2>Paste HTML Source</h2>';
         echo '<p class="description">Recommended for UsedCarsNI pages that block direct server fetching. Open the listing, right click, choose <strong>View Page Source</strong>, copy all, then paste below.</p>';
-        echo '<label for="motoplus_import_html"><strong>Listing HTML</strong></label>';
+        echo '<label for="motoplus_import_source_url"><strong>Original Listing URL (optional)</strong></label><input type="url" id="motoplus_import_source_url" class="large-text" placeholder="https://www.usedcarsni.com/...">';
+        echo '<br><br><label for="motoplus_import_html"><strong>Listing HTML</strong></label>';
         echo '<textarea id="motoplus_import_html" class="large-text code" rows="14" placeholder="Paste full page source HTML here..."></textarea>';
         echo '<p><button type="button" class="button button-primary" id="motoplus_import_html_btn">Extract from HTML</button> <span id="motoplus_import_html_result"></span></p>';
         echo '</div>';
@@ -616,7 +617,7 @@ class Motoplus_V1 {
         }
 
         // UsedCarsNI prints many useful details as label/value pairs. This helper captures the value after a label up to the next known label.
-        $labels = ['Mileage','Location','Payload','Colour','Color','Engine Size','Fuel Type','Transmission','Doors','Seats','Body Style','Owners','MOT Expiry','Standard Tax','Tax Band','CO2 Emission','Price'];
+        $labels = ['Mileage','Location','Payload','Colour','Color','Engine Size','Fuel Type','Transmission','Doors','Seats','Body Style','Owners','MOT Expiry','Standard Tax','Tax Band','CO2 Emission'];
         $find_value = function($label) use ($page_text, $labels) {
             $next = array_filter($labels, fn($l) => strcasecmp($l, $label) !== 0);
             $next_regex = implode('|', array_map(fn($l) => preg_quote($l, '/'), $next));
@@ -629,13 +630,31 @@ class Motoplus_V1 {
         $label_map = [
             'Mileage'=>'mileage','Location'=>'location','Payload'=>'payload','Colour'=>'colour','Color'=>'colour','Engine Size'=>'engine',
             'Fuel Type'=>'fuel','Transmission'=>'gearbox','Doors'=>'doors','Seats'=>'seats','Body Style'=>'body','Owners'=>'owners',
-            'MOT Expiry'=>'mot_expiry','Standard Tax'=>'road_tax','Tax Band'=>'tax_band','CO2 Emission'=>'co2','Price'=>'price'
+            'MOT Expiry'=>'mot_expiry','Standard Tax'=>'road_tax','Tax Band'=>'tax_band','CO2 Emission'=>'co2'
         ];
         foreach ($label_map as $label=>$key) {
             $value = $find_value($label);
-            if ($value !== '') $fields[$key] = $value;
+            if ($value !== '' && empty($fields[$key])) $fields[$key] = $value;
         }
-        if (empty($fields['price']) && preg_match('/£\s*([0-9][0-9,]*(?:\s*\+\s*VAT)?)/i', $page_text, $m)) $fields['price'] = $m[1];
+
+        // Price needs special handling. Do not use a generic label capture because finance examples and hidden filter values can be close to the word price.
+        $clean_money = function($value) {
+            $value = html_entity_decode((string)$value, ENT_QUOTES | ENT_HTML5);
+            if (preg_match('/([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,})(?:\.[0-9]{2})?/', $value, $m)) {
+                return preg_replace('/[^0-9.]/', '', $m[1]);
+            }
+            return '';
+        };
+        $price_candidates = [];
+        if (!empty($jsonld_data['offers']['price'])) $price_candidates[] = $jsonld_data['offers']['price'];
+        foreach ($xp->query('//*[contains(concat(" ", normalize-space(@class), " "), " car-detail-price__price ")]') as $price_node) $price_candidates[] = $price_node->textContent;
+        $og_description = $attr('//meta[@property="og:description"]', 'content') ?: $attr('//meta[@name="description"]', 'content');
+        if ($og_description) $price_candidates[] = $og_description;
+        foreach ($price_candidates as $candidate) {
+            $cleaned_price = $clean_money($candidate);
+            if ($cleaned_price !== '') { $fields['price'] = $cleaned_price; break; }
+        }
+        if (empty($fields['price']) && preg_match('/£\s*([0-9][0-9,]*)/i', $page_text, $m)) $fields['price'] = preg_replace('/[^0-9.]/', '', $m[1]);
         if (empty($fields['mileage']) && preg_match('/([0-9][0-9,]*)\s*miles/i', $page_text, $m)) $fields['mileage'] = $m[1];
 
         // Infer year, make, model and variant from the listing title, e.g. "2019 Audi A5 40 TFSI Black Edition 2dr S Tronic".
@@ -649,10 +668,26 @@ class Motoplus_V1 {
             if (empty($fields['variant']) && count($parts) > 2) $fields['variant'] = implode(' ', array_slice($parts, 2));
         }
 
-        foreach (['price','mileage','doors','owners','seats'] as $num) if (isset($fields[$num])) $fields[$num] = preg_replace('/[^0-9.]/', '', $fields[$num]);
-        if (!empty($fields['doors'])) $fields['doors'] = preg_replace('/[^0-9]/', '', $fields['doors']);
+        $clean_integer = function($value) {
+            $value = html_entity_decode((string)$value, ENT_QUOTES | ENT_HTML5);
+            if (preg_match('/([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)/', $value, $m)) return preg_replace('/[^0-9]/', '', $m[1]);
+            return '';
+        };
+        foreach (['mileage','doors','owners','seats'] as $num) if (isset($fields[$num])) $fields[$num] = $clean_integer($fields[$num]);
+        if (isset($fields['price'])) $fields['price'] = $clean_money($fields['price']);
         if (!empty($fields['gearbox'])) $fields['gearbox'] = ucfirst(strtolower($fields['gearbox']));
         if (!empty($fields['fuel'])) $fields['fuel'] = ucfirst(strtolower($fields['fuel']));
+
+        // Keep image imports tight. The raw page can include badges, finance icons, dealer banners and related vehicle thumbnails.
+        $listing_id = '';
+        if (preg_match('/"car_id"\s*:\s*"?(\d{6,})"?/i', $html, $m)) $listing_id = $m[1];
+        if (!$listing_id) {
+            $canonical = $attr('//link[@rel="canonical"]', 'href') ?: $url;
+            if (preg_match('/-(\d{6,})(?:\?|$)/', $canonical, $m)) $listing_id = $m[1];
+        }
+        $listing_path = '';
+        if ($listing_id && strlen($listing_id) >= 9) $listing_path = substr($listing_id, 0, 3).'/'.substr($listing_id, 3, 3).'/'.substr($listing_id, 6, 3);
+
         $images = [];
         if (!empty($jsonld_data['image'])) {
             if (is_array($jsonld_data['image'])) $images = array_merge($images, $jsonld_data['image']);
@@ -661,17 +696,22 @@ class Motoplus_V1 {
         foreach ($xp->query('//meta[@property="og:image"]') as $img) $images[] = $img->getAttribute('content');
         foreach ($xp->query('//img') as $img) {
             $src = $img->getAttribute('data-src') ?: $img->getAttribute('data-lazy') ?: $img->getAttribute('src');
-            if (!$src) continue;
-            if (stripos($src, 'logo') !== false || stripos($src, 'icon') !== false) continue;
-            $images[] = $src;
+            if ($src) $images[] = $src;
+        }
+        if (preg_match_all('/https?:\/\/image\.usedcarsni\.com\/photos\/[^"\'\s<>,]+/i', $html, $matches)) {
+            $images = array_merge($images, $matches[0]);
         }
         $base = wp_parse_url($url);
-        $base_url = $base['scheme'].'://'.$base['host'];
-        $images = array_values(array_unique(array_filter(array_map(function($src) use ($base_url) {
+        $base_url = (!empty($base['scheme']) && !empty($base['host'])) ? $base['scheme'].'://'.$base['host'] : 'https://www.usedcarsni.com';
+        $images = array_values(array_unique(array_filter(array_map(function($src) use ($base_url, $listing_path) {
             $src = html_entity_decode(trim($src));
+            $src = preg_replace('/\s+.*$/', '', $src);
+            $src = preg_replace('/(\.(?:jpg|jpeg|png|webp))(?:\/.*)?$/i', '$1', $src);
             if (strpos($src, '//') === 0) $src = 'https:'.$src;
             elseif (strpos($src, '/') === 0) $src = $base_url.$src;
             if (!preg_match('/^https?:\/\//i', $src)) return '';
+            if (stripos($src, 'image.usedcarsni.com/photos/') === false) return '';
+            if ($listing_path && strpos($src, '/'.$listing_path.'/') === false) return '';
             return $src;
         }, $images))));
 
